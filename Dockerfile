@@ -1,15 +1,18 @@
 # Multi-stage Dockerfile for doctown
 # Builds a complete pipeline with CUDA, Python ML models, and Rust binary
 
-# Stage 1: Rust builder
-FROM rust:latest as rust-builder
+# Stage 1: Rust builder - use Ubuntu 22.04 base to match runtime GLIBC
+FROM ubuntu:22.04 as rust-builder
 
 WORKDIR /build
 
-# Install build dependencies
+# Install Rust and build dependencies
 RUN apt-get update && \
-    apt-get install -y pkg-config libssl-dev && \
+    apt-get install -y curl build-essential pkg-config libssl-dev && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Copy Rust source
 COPY Cargo.toml Cargo.lock* ./
@@ -31,6 +34,7 @@ RUN apt-get update && \
         git \
         wget \
         curl \
+        unzip \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -53,8 +57,13 @@ RUN chmod +x /opt/*.py
 # Copy Rust binary from builder
 COPY --from=rust-builder /build/target/release/doctown /usr/local/bin/doctown
 
-# Create working directory
+# Copy entrypoint script
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Create working directory and output directory
 WORKDIR /workspace
+RUN mkdir -p /output
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
@@ -64,6 +73,6 @@ ENV CUDA_VISIBLE_DEVICES=0
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD doctown --version || exit 1
 
-# Default command
-ENTRYPOINT ["doctown"]
+# Use entrypoint script to handle URL downloads
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["--help"]

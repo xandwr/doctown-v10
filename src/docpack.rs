@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{Datelike, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -122,10 +122,21 @@ impl DocpackWriter {
         let file = File::create(output_path)
             .context(format!("Failed to create output file: {}", output_path))?;
         let mut zip = ZipWriter::new(file);
-        // Specify the type parameter so the compiler can infer `FileOptions` correctly.
+        // Set proper file options with current timestamp
+        let now = chrono::Local::now();
         let options: FileOptions<'_, ()> = FileOptions::default()
             .compression_method(CompressionMethod::Deflated)
-            .unix_permissions(0o644);
+            .unix_permissions(0o666)
+            .last_modified_time(
+                zip::DateTime::from_date_and_time(
+                    now.year() as u16,
+                    now.month() as u8,
+                    now.day() as u8,
+                    now.hour() as u8,
+                    now.minute() as u8,
+                    now.second() as u8,
+                ).unwrap_or_default()
+            );
 
         // Add database
         eprintln!("[docpack] Adding docpack.sqlite to archive...");
@@ -163,6 +174,16 @@ impl DocpackWriter {
         // Finish ZIP
         zip.finish()
             .context("Failed to finalize ZIP file")?;
+
+        // Set proper file permissions (readable and writable by owner and group)
+        #[cfg(unix)]
+        {
+            use std::fs;
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = fs::Permissions::from_mode(0o666);
+            fs::set_permissions(output_path, permissions)
+                .context("Failed to set file permissions")?;
+        }
 
         // Clean up temporary database file
         std::fs::remove_file(&temp_db_path)

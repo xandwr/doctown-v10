@@ -169,7 +169,12 @@ fn build_docpack(
         eprintln!("STEP 3: Generating embeddings");
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         
-        let embed_script = "embed_chunks.py";
+        // Try /opt/embed_chunks.py first (Docker), then local
+        let embed_script = if Path::new("/opt/embed_chunks.py").exists() {
+            "/opt/embed_chunks.py"
+        } else {
+            "embed_chunks.py"
+        };
         
         // Check if Python and script exist
         if !Path::new(python_path).exists() {
@@ -205,6 +210,24 @@ fn build_docpack(
     docpack
         .write_to_file(&output)
         .context("Failed to write docpack file")?;
+
+    // Also save a copy to ~/.localdoc/docpacks/
+    if let Some(home_dir) = std::env::var_os("HOME") {
+        let local_docpacks_dir = Path::new(&home_dir).join(".localdoc").join("docpacks");
+        if let Err(e) = std::fs::create_dir_all(&local_docpacks_dir) {
+            eprintln!("\n⚠️  WARNING: Could not create ~/.localdoc/docpacks/: {}", e);
+        } else {
+            let output_path = Path::new(&output);
+            if let Some(filename) = output_path.file_name() {
+                let local_copy = local_docpacks_dir.join(filename);
+                if let Err(e) = std::fs::copy(&output, &local_copy) {
+                    eprintln!("\n⚠️  WARNING: Could not copy to ~/.localdoc/docpacks/: {}", e);
+                } else {
+                    eprintln!("[docpack] ✓ Saved copy to: {}", local_copy.display());
+                }
+            }
+        }
+    }
 
     eprintln!("\n═══════════════════════════════════════════");
     eprintln!("✅ DOCPACK CREATED SUCCESSFULLY!");

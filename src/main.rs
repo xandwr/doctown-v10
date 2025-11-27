@@ -9,7 +9,7 @@ use std::path::Path;
 
 use chunker::process_repository;
 use docpack::DocpackWriter;
-use python_bridge::generate_embeddings;
+use python_bridge::{generate_embeddings, generate_documentation};
 
 #[derive(Parser)]
 #[command(name = "doctown")]
@@ -42,6 +42,22 @@ enum Commands {
         /// Skip embedding generation
         #[arg(long)]
         skip_embeddings: bool,
+
+        /// Path to GGUF model for LLM generation
+        #[arg(long)]
+        generator_model: Option<String>,
+
+        /// Skip LLM generation step
+        #[arg(long)]
+        skip_generation: bool,
+
+        /// Max tokens for LLM generation
+        #[arg(long, default_value = "4096")]
+        max_tokens: u32,
+
+        /// Temperature for LLM generation
+        #[arg(long, default_value = "0.3")]
+        temperature: f32,
     },
 
     /// Query an existing docpack
@@ -81,8 +97,22 @@ fn run() -> Result<()> {
             python,
             embedding_model,
             skip_embeddings,
+            generator_model,
+            skip_generation,
+            max_tokens,
+            temperature,
         } => {
-            build_docpack(&repo, output.as_deref(), &python, &embedding_model, skip_embeddings)?;
+            build_docpack(
+                &repo,
+                output.as_deref(),
+                &python,
+                &embedding_model,
+                skip_embeddings,
+                generator_model.as_deref(),
+                skip_generation,
+                max_tokens,
+                temperature,
+            )?;
         }
         Commands::Query { docpack, query } => {
             query_docpack(&docpack, &query)?;
@@ -98,6 +128,10 @@ fn build_docpack(
     python_path: &str,
     embedding_model: &str,
     skip_embeddings: bool,
+    generator_model: Option<&str>,
+    skip_generation: bool,
+    max_tokens: u32,
+    temperature: f32,
 ) -> Result<()> {
     eprintln!("\n═══════════════════════════════════════════");
     eprintln!("  DOCTOWN v{}", env!("CARGO_PKG_VERSION"));
@@ -202,9 +236,121 @@ fn build_docpack(
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     }
 
-    // Step 4: Write docpack file
+    // Step 4: Generate documentation with LLM (optional)
+    if !skip_generation {
+        if let Some(model_path) = generator_model {
+            eprintln!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("STEP 4: Generating documentation with LLM");
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            
+            // Try /opt/generate.py first (Docker), then local
+            let gen_script = if Path::new("/opt/generate.py").exists() {
+                "/opt/generate.py"
+            } else {
+                "generate.py"
+            };
+            
+            if !Path::new(python_path).exists() {
+                eprintln!("\n⚠️  WARNING: Python not found at {}", python_path);
+                eprintln!("   Skipping LLM generation.");
+            } else if !Path::new(gen_script).exists() {
+                eprintln!("\n⚠️  WARNING: Generation script not found: {}", gen_script);
+                eprintln!("   Skipping LLM generation.");
+            } else if !Path::new(model_path).exists() {
+                eprintln!("\n⚠️  WARNING: Model not found: {}", model_path);
+                eprintln!("   Skipping LLM generation.");
+            } else {
+                // Get all symbols and files for generation
+                let symbols = docpack.db().get_all_symbols()
+                    .context("Failed to get symbols")?;
+                
+                let generation_output = generate_documentation(
+                    &chunks,
+                    &symbols,
+                    &file_infos,
+                    python_path,
+                    gen_script,
+                    model_path,
+                    max_tokens,
+                    temperature,
+                )
+                .context("Failed to generate documentation")?;
+
+                // Store generated content in database
+                eprintln!("[docpack] Inserting generated content...");
+                
+                for subsystem in &generation_output.subsystems {
+                    docpack
+                        .db_mut()
+                        .insert_subsystem(
+                            &subsystem.name,
+                            &subsystem.description,
+                            subsystem.confidence,
+                            &subsystem.files,
+                            &subsystem.primary_purpose,
+                        )
+                        .context(format!("Failed to insert subsystem: {}", subsystem.name))?;
+                }
+
+                for enriched_symbol in &generation_output.enriched_symbols {
+                    docpack
+                        .db_mut()
+                        .insert_enriched_symbol(
+                            &enriched_symbol.symbol_id,
+                            &enriched_symbol.name,
+                            &enriched_symbol.documentation,
+                            &enriched_symbol.usage_examples,
+                            &enriched_symbol.related_symbols,
+                            enriched_symbol.complexity_notes.as_deref(),
+                        )
+                        .context(format!("Failed to insert enriched symbol: {}", enriched_symbol.symbol_id))?;
+                }
+
+                for insight in &generation_output.architecture_insights {
+                    docpack
+                        .db_mut()
+                        .insert_architecture_insight(
+                            &insight.category,
+                            &insight.description,
+                            &insight.affected_components,
+                        )
+                        .context("Failed to insert architecture insight")?;
+                }
+
+                docpack
+                    .db_mut()
+                    .insert_quickstart(
+                        &generation_output.quickstart.entry_points,
+                        &generation_output.quickstart.core_types,
+                        &generation_output.quickstart.getting_started,
+                    )
+                    .context("Failed to insert quickstart info")?;
+
+                // Update manifest with generator model
+                docpack.set_generator_model(
+                    Path::new(model_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(model_path)
+                        .to_string()
+                );
+
+                eprintln!("[docpack] ✓ Generated content stored");
+            }
+        } else {
+            eprintln!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("STEP 4: Skipping LLM generation (no --generator-model)");
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        }
+    } else {
+        eprintln!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("STEP 4: Skipping LLM generation (--skip-generation)");
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    }
+
+    // Step 5: Write docpack file
     eprintln!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    eprintln!("STEP 4: Writing docpack archive");
+    eprintln!("STEP 5: Writing docpack archive");
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     
     docpack

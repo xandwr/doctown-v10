@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::process::{Command, Stdio};
 use std::io::Write;
 
-use crate::db::{CodeChunk, Embedding};
+use crate::db::{CodeChunk, Embedding, Symbol, FileInfo};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ChunkInput {
@@ -203,4 +203,137 @@ pub fn rerank_chunks(
     eprintln!("[python] ✓ Reranked {} chunks", results.len());
 
     Ok(results)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GenerationInput {
+    pub chunks: Vec<CodeChunk>,
+    pub symbols: Vec<Symbol>,
+    pub files: Vec<FileInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Subsystem {
+    pub name: String,
+    pub description: String,
+    pub confidence: f32,
+    pub files: Vec<String>,
+    pub primary_purpose: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnrichedSymbol {
+    pub symbol_id: String,
+    pub name: String,
+    pub documentation: String,
+    pub usage_examples: Vec<String>,
+    pub related_symbols: Vec<String>,
+    pub complexity_notes: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ArchitectureInsight {
+    pub category: String,
+    pub description: String,
+    pub affected_components: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QuickstartInfo {
+    pub entry_points: Vec<String>,
+    pub core_types: Vec<String>,
+    pub getting_started: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GenerationOutput {
+    pub subsystems: Vec<Subsystem>,
+    pub enriched_symbols: Vec<EnrichedSymbol>,
+    pub architecture_insights: Vec<ArchitectureInsight>,
+    pub quickstart: QuickstartInfo,
+    pub error: Option<String>,
+    pub raw_output: Option<String>,
+}
+
+/// Call Python script to generate documentation with LLM
+pub fn generate_documentation(
+    chunks: &[CodeChunk],
+    symbols: &[Symbol],
+    files: &[FileInfo],
+    python_path: &str,
+    script_path: &str,
+    model_path: &str,
+    max_tokens: u32,
+    temperature: f32,
+) -> Result<GenerationOutput> {
+    eprintln!("[python] Generating documentation with LLM...");
+    eprintln!("[python] Model: {}", model_path);
+    eprintln!("[python] Processing {} chunks, {} symbols, {} files", 
+              chunks.len(), symbols.len(), files.len());
+
+    // Prepare input data
+    let input = GenerationInput {
+        chunks: chunks.to_vec(),
+        symbols: symbols.to_vec(),
+        files: files.to_vec(),
+    };
+
+    let input_json = serde_json::to_string(&input)
+        .context("Failed to serialize generation input to JSON")?;
+
+    // Call Python script
+    let mut child = Command::new(python_path)
+        .arg(script_path)
+        .arg("--model")
+        .arg(model_path)
+        .arg("--max-tokens")
+        .arg(max_tokens.to_string())
+        .arg("--temperature")
+        .arg(temperature.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn Python process for generation")?;
+
+    // Write input to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input_json.as_bytes())
+            .context("Failed to write to Python stdin")?;
+    }
+
+    // Wait for completion and collect output
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for Python generation process")?;
+
+    // Check exit status
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("[python] Error output:\n{}", stderr);
+        bail!("Python generation script failed with exit code: {:?}", output.status.code());
+    }
+
+    // Print stderr for debugging
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.is_empty() {
+        eprintln!("[python] Script output:\n{}", stderr);
+    }
+
+    // Parse output
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let generation_output: GenerationOutput = serde_json::from_str(&stdout)
+        .context(format!("Failed to parse Python generation output. Output was:\n{}", stdout))?;
+
+    if let Some(ref error) = generation_output.error {
+        eprintln!("[python] Warning: Generation had errors: {}", error);
+    }
+
+    eprintln!("[python] ✓ Generated documentation:");
+    eprintln!("  - {} subsystems", generation_output.subsystems.len());
+    eprintln!("  - {} enriched symbols", generation_output.enriched_symbols.len());
+    eprintln!("  - {} architecture insights", generation_output.architecture_insights.len());
+
+    Ok(generation_output)
 }

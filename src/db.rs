@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeChunk {
     pub id: String,
     pub file_path: String,
@@ -14,14 +14,14 @@ pub struct CodeChunk {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Embedding {
     pub chunk_id: String,
     pub vector: Vec<f32>,
     pub model: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub id: String,
     pub name: String,
@@ -32,7 +32,7 @@ pub struct Symbol {
     pub documentation: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
     pub path: String,
     pub hash: String,
@@ -107,6 +107,38 @@ impl DocpackDB {
             CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);
             CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_path);
             CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+
+            CREATE TABLE IF NOT EXISTS subsystems (
+                name TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                files TEXT NOT NULL,
+                primary_purpose TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS enriched_symbols (
+                symbol_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                documentation TEXT NOT NULL,
+                usage_examples TEXT,
+                related_symbols TEXT,
+                complexity_notes TEXT,
+                FOREIGN KEY (symbol_id) REFERENCES symbols(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS architecture_insights (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                affected_components TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS quickstart (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                entry_points TEXT NOT NULL,
+                core_types TEXT NOT NULL,
+                getting_started TEXT NOT NULL
+            );
             "#,
         )
         .context("Failed to initialize database schema")?;
@@ -309,6 +341,91 @@ impl DocpackDB {
             .execute_batch(&sql)
             .context(format!("Failed to save database to {}", path))?;
 
+        Ok(())
+    }
+
+    /// Insert a subsystem
+    pub fn insert_subsystem(
+        &self,
+        name: &str,
+        description: &str,
+        confidence: f32,
+        files: &[String],
+        primary_purpose: &str,
+    ) -> Result<()> {
+        let files_json = serde_json::to_string(files)
+            .context("Failed to serialize files")?;
+        
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO subsystems (name, description, confidence, files, primary_purpose) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![name, description, confidence, files_json, primary_purpose],
+            )
+            .context(format!("Failed to insert subsystem: {}", name))?;
+        Ok(())
+    }
+
+    /// Insert enriched symbol documentation
+    pub fn insert_enriched_symbol(
+        &self,
+        symbol_id: &str,
+        name: &str,
+        documentation: &str,
+        usage_examples: &[String],
+        related_symbols: &[String],
+        complexity_notes: Option<&str>,
+    ) -> Result<()> {
+        let examples_json = serde_json::to_string(usage_examples)
+            .context("Failed to serialize usage examples")?;
+        let related_json = serde_json::to_string(related_symbols)
+            .context("Failed to serialize related symbols")?;
+        
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO enriched_symbols (symbol_id, name, documentation, usage_examples, related_symbols, complexity_notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![symbol_id, name, documentation, examples_json, related_json, complexity_notes],
+            )
+            .context(format!("Failed to insert enriched symbol: {}", symbol_id))?;
+        Ok(())
+    }
+
+    /// Insert architecture insight
+    pub fn insert_architecture_insight(
+        &self,
+        category: &str,
+        description: &str,
+        affected_components: &[String],
+    ) -> Result<()> {
+        let components_json = serde_json::to_string(affected_components)
+            .context("Failed to serialize affected components")?;
+        
+        self.conn
+            .execute(
+                "INSERT INTO architecture_insights (category, description, affected_components) VALUES (?1, ?2, ?3)",
+                params![category, description, components_json],
+            )
+            .context("Failed to insert architecture insight")?;
+        Ok(())
+    }
+
+    /// Insert or update quickstart info
+    pub fn insert_quickstart(
+        &self,
+        entry_points: &[String],
+        core_types: &[String],
+        getting_started: &str,
+    ) -> Result<()> {
+        let entry_json = serde_json::to_string(entry_points)
+            .context("Failed to serialize entry points")?;
+        let types_json = serde_json::to_string(core_types)
+            .context("Failed to serialize core types")?;
+        
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO quickstart (id, entry_points, core_types, getting_started) VALUES (1, ?1, ?2, ?3)",
+                params![entry_json, types_json, getting_started],
+            )
+            .context("Failed to insert quickstart info")?;
         Ok(())
     }
 }

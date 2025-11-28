@@ -384,27 +384,26 @@ fn launch_service(service_type: ServiceType, processes: &Arc<Mutex<Vec<ServicePr
     let child = match service_type {
         ServiceType::PythonEmbedding => {
             let python_path = project_root.join("python").join("embedding");
-            Command::new("python")
-                .arg("server.py")
-                .current_dir(&python_path)
-                .spawn()
-                .map_err(|e| format!("Failed to launch embedding service: {}. Make sure you're in the correct directory and Python is installed.", e))?
+            launch_in_terminal(
+                "Embedding Service",
+                &["python", "server.py"],
+                &python_path,
+            ).map_err(|e| format!("Failed to launch embedding service: {}", e))?
         }
         ServiceType::PythonDocumenter => {
             let python_path = project_root.join("python").join("documenter");
-            Command::new("python")
-                .arg("server.py")
-                .current_dir(&python_path)
-                .spawn()
-                .map_err(|e| format!("Failed to launch documenter service: {}. Make sure you're in the correct directory and Python is installed.", e))?
+            launch_in_terminal(
+                "Documenter Service",
+                &["python", "server.py"],
+                &python_path,
+            ).map_err(|e| format!("Failed to launch documenter service: {}", e))?
         }
         ServiceType::RustMain => {
-            Command::new("cargo")
-                .arg("run")
-                .arg("--release")
-                .current_dir(&project_root)
-                .spawn()
-                .map_err(|e| format!("Failed to launch Doctown main: {}", e))?
+            launch_in_terminal(
+                "Doctown Main",
+                &["cargo", "run", "--release"],
+                &project_root,
+            ).map_err(|e| format!("Failed to launch Doctown main: {}", e))?
         }
         ServiceType::Database => {
             return Err("Database management not implemented yet".to_string());
@@ -418,6 +417,72 @@ fn launch_service(service_type: ServiceType, processes: &Arc<Mutex<Vec<ServicePr
     });
 
     Ok(())
+}
+
+fn launch_in_terminal(title: &str, command_args: &[&str], working_dir: &PathBuf) -> std::io::Result<Child> {
+    // Build the command string to execute
+    let command_str = command_args.join(" ");
+    
+    // Try x-terminal-emulator first (Debian/Ubuntu default)
+    let result = Command::new("x-terminal-emulator")
+        .arg("-T")
+        .arg(title)
+        .arg("-e")
+        .arg("bash")
+        .arg("-c")
+        .arg(format!("cd '{}' && {} ; echo 'Press Enter to close...'; read", working_dir.display(), command_str))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    
+    if result.is_ok() {
+        return result;
+    }
+    
+    // Try xterm (widely available)
+    let result = Command::new("xterm")
+        .arg("-title")
+        .arg(title)
+        .arg("-hold")
+        .arg("-e")
+        .arg("bash")
+        .arg("-c")
+        .arg(format!("cd '{}' && {}", working_dir.display(), command_str))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    
+    if result.is_ok() {
+        return result;
+    }
+    
+    // Try konsole (KDE)
+    let result = Command::new("konsole")
+        .arg("--title")
+        .arg(title)
+        .arg("-e")
+        .arg("bash")
+        .arg("-c")
+        .arg(format!("cd '{}' && {} ; exec bash", working_dir.display(), command_str))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    
+    if result.is_ok() {
+        return result;
+    }
+    
+    // Last resort: try gnome-terminal with proper environment
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("gnome-terminal --title='{}' -- bash -c \"cd '{}' && {} ; exec bash\"", title, working_dir.display(), command_str))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
 }
 
 fn stop_all_services(processes: &Arc<Mutex<Vec<ServiceProcess>>>) {

@@ -3,8 +3,13 @@ use doctown_v10::{
     chunk_semantic_units, kmeans,
 };
 use std::time::Instant;
+use std::process::Command;
+use std::path::PathBuf;
 
 fn main() -> Result<(), SandboxError> {
+    // Check and auto-launch backend services if needed
+    check_and_launch_services();
+    
     let start_time = Instant::now();
     println!("=== DocTown v10: Sandboxed ZIP Ingestion with Parser Pipeline ===\n");
 
@@ -269,4 +274,134 @@ fn main() -> Result<(), SandboxError> {
     println!("\nNext step: Generate summaries from clusters for RAG");
 
     Ok(())
+}
+
+fn check_and_launch_services() {
+    println!("Checking backend services...");
+    
+    // Check embedding service
+    if !check_service("http://localhost:18115/health") {
+        println!("  ⚠ Embedding service not running - launching...");
+        if let Err(e) = launch_service("Embedding Service", &["python3", "server.py"], "python/embedding") {
+            eprintln!("  ✗ Failed to launch embedding service: {}", e);
+        } else {
+            println!("  ✓ Embedding service launched in new window");
+            // Give it a moment to start
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    } else {
+        println!("  ✓ Embedding service is running");
+    }
+    
+    // Check documenter service
+    if !check_service("http://localhost:18116/health") {
+        println!("  ⚠ Documenter service not running - launching...");
+        if let Err(e) = launch_service("Documenter Service", &["python3", "server.py"], "python/documenter") {
+            eprintln!("  ✗ Failed to launch documenter service: {}", e);
+        } else {
+            println!("  ✓ Documenter service launched in new window");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    } else {
+        println!("  ✓ Documenter service is running");
+    }
+    
+    println!();
+}
+
+fn check_service(url: &str) -> bool {
+    match reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+    {
+        Ok(client) => match client.get(url).send() {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    }
+}
+
+fn launch_service(title: &str, command_args: &[&str], relative_path: &str) -> std::io::Result<()> {
+    let project_root = std::env::current_dir()?;
+    let working_dir = project_root.join(relative_path);
+    
+    launch_in_terminal(title, command_args, &working_dir)?;
+    Ok(())
+}
+
+fn launch_in_terminal(title: &str, command_args: &[&str], working_dir: &PathBuf) -> std::io::Result<std::process::Child> {
+    let command_str = command_args.join(" ");
+    
+    // Get project root to access python/.venv
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let venv_activate = project_root.join("python").join(".venv").join("bin").join("activate");
+    
+    // Source bashrc, activate uv venv if it exists, then run command
+    let full_command = format!(
+        "source ~/.bashrc 2>/dev/null || source /etc/bash.bashrc 2>/dev/null; \
+         if [ -f '{}' ]; then source '{}'; fi; \
+         cd '{}' && {} ; \
+         echo ''; echo 'Process finished. Press Enter to close...'; read",
+        venv_activate.display(),
+        venv_activate.display(),
+        working_dir.display(),
+        command_str
+    );
+    
+    // Try xterm first (now installed, reliable, no snap conflicts)
+    let result = Command::new("xterm")
+        .arg("-title")
+        .arg(title)
+        .arg("-hold")
+        .arg("-e")
+        .arg("bash")
+        .arg("-c")
+        .arg(&full_command)
+        .spawn();
+    
+    if result.is_ok() {
+        return result;
+    }
+    
+    // Try konsole (KDE)
+    let result = Command::new("konsole")
+        .arg("--title")
+        .arg(title)
+        .arg("-e")
+        .arg("bash")
+        .arg("-c")
+        .arg(&full_command)
+        .spawn();
+    
+    if result.is_ok() {
+        return result;
+    }
+    
+    // Try gnome-terminal with clean env to avoid snap issues
+    let result = Command::new("env")
+        .arg("-i")
+        .arg("DISPLAY=:0")
+        .arg(format!("HOME={}", std::env::var("HOME").unwrap_or_else(|_| "/home/xander".to_string())))
+        .arg("PATH=/usr/local/bin:/usr/bin:/bin")
+        .arg("gnome-terminal")
+        .arg("--title")
+        .arg(title)
+        .arg("--")
+        .arg("bash")
+        .arg("-c")
+        .arg(&full_command)
+        .spawn();
+    
+    if result.is_ok() {
+        return result;
+    }
+    
+    // Try x-terminal-emulator as fallback
+    Command::new("x-terminal-emulator")
+        .arg("-e")
+        .arg("bash")
+        .arg("-c")
+        .arg(&full_command)
+        .spawn()
 }

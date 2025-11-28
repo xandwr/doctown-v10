@@ -1,0 +1,9 @@
+[package]
+name = "localdoc"
+version = "0.1.0"
+edition = "2024"
+publish = true
+license = "MIT"
+description = "A CLI for interacting with .docpack files."
+
+[dependencies]

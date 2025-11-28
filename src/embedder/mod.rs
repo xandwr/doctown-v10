@@ -1,12 +1,12 @@
-pub mod client;
 pub mod batcher;
-pub mod types;
+pub mod client;
 pub mod model;
+pub mod types;
 
 #[cfg(test)]
 mod tests;
 
-pub use client::{EmbeddingClient, EmbedError};
 pub use batcher::Batcher;
-pub use types::{EmbeddingRequest, EmbeddingResponse};
+pub use client::{EmbedError, EmbeddingClient};
 pub use model::EmbeddingModelInfo;
+pub use types::{EmbeddingRequest, EmbeddingResponse};

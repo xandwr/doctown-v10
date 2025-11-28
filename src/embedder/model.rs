@@ -1,5 +1,5 @@
 // model.rs - stores metadata about the model you're using
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingModelInfo {

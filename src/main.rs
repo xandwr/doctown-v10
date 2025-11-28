@@ -1,9 +1,11 @@
 use doctown_v10::{
-    DEFAULT_MAX_TOKENS, ParserRegistry, SandboxBuilder, SandboxError, chunk_semantic_units,
+    DEFAULT_MAX_TOKENS, EmbeddingClient, ParserRegistry, SandboxBuilder, SandboxError,
+    chunk_semantic_units, kmeans,
 };
 use std::time::Instant;
 
-fn main() -> Result<(), SandboxError> {
+#[tokio::main]
+async fn main() -> Result<(), SandboxError> {
     let start_time = Instant::now();
     println!("=== DocTown v10: Sandboxed ZIP Ingestion with Parser Pipeline ===\n");
 
@@ -84,6 +86,7 @@ fn main() -> Result<(), SandboxError> {
     let mut total_chunks = 0;
     let mut total_chunk_tokens = 0;
     let mut chunks_shown = 0;
+    let mut all_chunks = Vec::new();
 
     for parse_result in all_parse_results {
         let chunks = chunk_semantic_units(parse_result.semantic_units, DEFAULT_MAX_TOKENS);
@@ -101,12 +104,79 @@ fn main() -> Result<(), SandboxError> {
 
         total_chunks += chunks.len();
         total_chunk_tokens += chunks.iter().map(|c| c.metadata.token_count).sum::<usize>();
+        all_chunks.extend(chunks);
     }
 
     let step4_duration = step4_start.elapsed();
     println!(
         "\n✓ Chunking complete [{:.2}s]\n",
         step4_duration.as_secs_f64()
+    );
+
+    // Step 5: Embed chunks
+    let step5_start = Instant::now();
+    println!("Step 5: Embedding chunks...\n");
+
+    let embedding_client = EmbeddingClient::new("http://localhost:18115");
+    let chunk_texts: Vec<String> = all_chunks.iter().map(|c| c.text.clone()).collect();
+
+    println!(
+        "  Sending {} chunks to embedding server...",
+        chunk_texts.len()
+    );
+    let embeddings = match embedding_client.embed_chunks(chunk_texts).await {
+        Ok(emb) => {
+            println!("  ✓ Received {} embeddings", emb.len());
+            if !emb.is_empty() {
+                println!("  Embedding dimensions: {}", emb[0].len());
+            }
+            emb
+        }
+        Err(e) => {
+            eprintln!("  ✗ Embedding failed: {}", e);
+            eprintln!("\n  Make sure the Python embedding server is running:");
+            eprintln!("    cd python/embedding && python server.py\n");
+            return Ok(());
+        }
+    };
+
+    let step5_duration = step5_start.elapsed();
+    println!(
+        "\n✓ Embedding complete [{:.2}s]\n",
+        step5_duration.as_secs_f64()
+    );
+
+    // Step 6: Cluster embeddings
+    let step6_start = Instant::now();
+    println!("Step 6: Clustering embeddings...\n");
+
+    // Calculate number of clusters (heuristic: sqrt(n) or max 50)
+    let k = (embeddings.len() as f64).sqrt().ceil() as usize;
+    let k = k.min(50).max(2);
+
+    println!("  Running k-means with k={} clusters...", k);
+    let cluster_result = kmeans(&embeddings, k, 100, 42);
+
+    println!("  ✓ Converged in {} iterations", cluster_result.iterations);
+    println!("  Total clusters: {}", cluster_result.clusters.len());
+
+    // Show cluster size distribution
+    let mut cluster_sizes: Vec<(u32, usize)> = cluster_result
+        .clusters
+        .iter()
+        .map(|c| (c.id, c.chunk_ids.len()))
+        .collect();
+    cluster_sizes.sort_by_key(|(_id, size)| std::cmp::Reverse(*size));
+
+    println!("\n  Largest clusters:");
+    for (id, size) in cluster_sizes.iter().take(5) {
+        println!("    Cluster {}: {} chunks", id, size);
+    }
+
+    let step6_duration = step6_start.elapsed();
+    println!(
+        "\n✓ Clustering complete [{:.2}s]\n",
+        step6_duration.as_secs_f64()
     );
 
     // Statistics
@@ -126,6 +196,24 @@ fn main() -> Result<(), SandboxError> {
         "Avg tokens/chunk:     {:.1}",
         if total_chunks > 0 {
             total_chunk_tokens as f64 / total_chunks as f64
+        } else {
+            0.0
+        }
+    );
+    println!("Embeddings:           {}", embeddings.len());
+    println!(
+        "Embedding dims:       {}",
+        if !embeddings.is_empty() {
+            embeddings[0].len()
+        } else {
+            0
+        }
+    );
+    println!("Clusters:             {}", cluster_result.clusters.len());
+    println!(
+        "Avg chunks/cluster:   {:.1}",
+        if cluster_result.clusters.len() > 0 {
+            total_chunks as f64 / cluster_result.clusters.len() as f64
         } else {
             0.0
         }
@@ -154,6 +242,16 @@ fn main() -> Result<(), SandboxError> {
         step4_duration.as_secs_f64(),
         100.0 * step4_duration.as_secs_f64() / total_duration.as_secs_f64()
     );
+    println!(
+        "Step 5 (Embedding):   {:.3}s ({:.1}%)",
+        step5_duration.as_secs_f64(),
+        100.0 * step5_duration.as_secs_f64() / total_duration.as_secs_f64()
+    );
+    println!(
+        "Step 6 (Clustering):  {:.3}s ({:.1}%)",
+        step6_duration.as_secs_f64(),
+        100.0 * step6_duration.as_secs_f64() / total_duration.as_secs_f64()
+    );
     println!("─────────────────────────────────");
     println!("Total execution:      {:.3}s", total_duration.as_secs_f64());
 
@@ -167,7 +265,9 @@ fn main() -> Result<(), SandboxError> {
         "Chunker configured:   Max {} tokens per chunk",
         DEFAULT_MAX_TOKENS
     );
-    println!("\nNext step: Implement language-specific parsers for better semantic units");
+    println!("Embedding model:      google/embeddinggemma-300m (768-dim)");
+    println!("Clustering:           K-means with cosine distance");
+    println!("\nNext step: Generate summaries from clusters for RAG");
 
     Ok(())
 }

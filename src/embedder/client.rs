@@ -59,7 +59,10 @@ impl EmbeddingClient {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(EmbedError::ServerError {
                 status: status.as_u16(),
                 body,

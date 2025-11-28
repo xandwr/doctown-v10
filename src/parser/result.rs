@@ -40,7 +40,7 @@ pub struct SemanticUnit {
 }
 
 /// Classification of semantic units
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SemanticKind {
     /// Unknown or unclassified content
     Unknown,

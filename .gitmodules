@@ -1,0 +1,3 @@
+[submodule "minui"]
+	path = minui
+	url = https://github.com/xandwr/minui

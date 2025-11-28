@@ -1,61 +1,189 @@
 use minui::prelude::*;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 enum MenuItem {
-    StartPipeline,
-    ViewStatus,
+    Launch,
+    Restart,
+    LaunchService,
     Configuration,
-    Exit,
+    Quit,
 }
 
 impl MenuItem {
     fn label(&self) -> &str {
         match self {
-            MenuItem::StartPipeline => "Start Documentation Pipeline",
-            MenuItem::ViewStatus => "View Pipeline Status",
+            MenuItem::Launch => "Launch",
+            MenuItem::Restart => "Restart",
+            MenuItem::LaunchService => "Launch Service",
             MenuItem::Configuration => "Configuration",
-            MenuItem::Exit => "Exit",
+            MenuItem::Quit => "Quit",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum SubMenuItem {
+    EmbeddingService,
+    ClusteringService,
+    WebServer,
+    Database,
+    Back,
+}
+
+impl SubMenuItem {
+    fn label(&self) -> &str {
+        match self {
+            SubMenuItem::EmbeddingService => "Embedding Service",
+            SubMenuItem::ClusteringService => "Clustering Service",
+            SubMenuItem::WebServer => "Web Server",
+            SubMenuItem::Database => "Database",
+            SubMenuItem::Back => "← Back to Main Menu",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+enum ServiceStatus {
+    Online,
+    Offline,
+    Starting,
+}
+
+impl ServiceStatus {
+    fn label(&self) -> &str {
+        match self {
+            ServiceStatus::Online => "●",
+            ServiceStatus::Offline => "○",
+            ServiceStatus::Starting => "◐",
+        }
+    }
+
+    fn color(&self) -> Color {
+        match self {
+            ServiceStatus::Online => Color::Green,
+            ServiceStatus::Offline => Color::Red,
+            ServiceStatus::Starting => Color::Yellow,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Service {
+    name: String,
+    port: u16,
+    status: ServiceStatus,
+    endpoint: String,
+}
+
+impl Service {
+    fn new(name: &str, port: u16, endpoint: &str) -> Self {
+        Service {
+            name: name.to_string(),
+            port,
+            status: ServiceStatus::Offline,
+            endpoint: endpoint.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum MenuMode {
+    Main,
+    ServiceSubmenu,
 }
 
 struct MenuState {
     selected: usize,
     items: Vec<MenuItem>,
+    sub_items: Vec<SubMenuItem>,
+    services: Arc<Mutex<Vec<Service>>>,
     running: bool,
+    mode: MenuMode,
 }
 
 fn main() -> minui::Result<()> {
+    let services = Arc::new(Mutex::new(vec![
+        Service::new("Embedding Service", 8000, "http://localhost:8000/health"),
+        Service::new("Clustering Service", 8001, "http://localhost:8001/health"),
+        Service::new("Web Server", 3000, "http://localhost:3000/health"),
+        Service::new("Database", 5432, "http://localhost:5432"),
+    ]));
+
     let state = MenuState {
         selected: 0,
         items: vec![
-            MenuItem::StartPipeline,
-            MenuItem::ViewStatus,
+            MenuItem::Launch,
+            MenuItem::Restart,
+            MenuItem::LaunchService,
             MenuItem::Configuration,
-            MenuItem::Exit,
+            MenuItem::Quit,
         ],
+        sub_items: vec![
+            SubMenuItem::EmbeddingService,
+            SubMenuItem::ClusteringService,
+            SubMenuItem::WebServer,
+            SubMenuItem::Database,
+            SubMenuItem::Back,
+        ],
+        services: Arc::clone(&services),
         running: true,
+        mode: MenuMode::Main,
     };
+
+    // Spawn background task for status polling
+    let services_clone = Arc::clone(&services);
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            loop {
+                check_services_status(&services_clone).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    });
 
     let mut app = App::new(state)?;
 
     app.run(
         |state, event| {
             match event {
-                Event::Character('q') | Event::Escape => state.running = false,
+                Event::Character('q') | Event::Escape => {
+                    match state.mode {
+                        MenuMode::Main => state.running = false,
+                        MenuMode::ServiceSubmenu => {
+                            state.mode = MenuMode::Main;
+                            state.selected = 0;
+                        }
+                    }
+                }
                 Event::KeyUp => {
                     if state.selected > 0 {
                         state.selected -= 1;
                     }
                 }
                 Event::KeyDown => {
-                    if state.selected < state.items.len() - 1 {
+                    let max_items = match state.mode {
+                        MenuMode::Main => state.items.len(),
+                        MenuMode::ServiceSubmenu => state.sub_items.len(),
+                    };
+                    if state.selected < max_items - 1 {
                         state.selected += 1;
                     }
                 }
                 Event::Enter => {
-                    let selected_item = state.items[state.selected].clone();
-                    handle_selection(&selected_item, state);
+                    match state.mode {
+                        MenuMode::Main => {
+                            let selected_item = state.items[state.selected].clone();
+                            handle_selection(&selected_item, state);
+                        }
+                        MenuMode::ServiceSubmenu => {
+                            let selected_item = state.sub_items[state.selected].clone();
+                            handle_submenu_selection(&selected_item, state);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -64,35 +192,48 @@ fn main() -> minui::Result<()> {
         |state, window| {
             let (width, height) = window.get_size();
 
-            // Create main container
-            let mut main_container = Container::fullscreen_with_size(width, height);
+            // Calculate panel widths (60% menu, 40% status)
+            let menu_width = (width as f32 * 0.6) as u16;
+            let status_width = width.saturating_sub(menu_width);
 
-            // Create centered content container
-            let mut content = Container::vertical()
+            // Create left panel (menu)
+            let mut menu_panel = Container::new(0, 0, menu_width, height)
                 .with_padding(2)
                 .with_border(BorderChars::double_line())
                 .with_border_color(Color::Cyan);
 
-            // ASCII Art Banner using figlet
+            // ASCII Art Banner
             let banner = FigletText::standard("DocTown")
-                .unwrap_or_else(|_| {
-                    // Fallback to a simple label if figlet fails
-                    FigletText::standard("").unwrap()
-                })
+                .unwrap_or_else(|_| FigletText::standard("").unwrap())
                 .with_color(ColorPair::new(Color::Cyan, Color::Transparent))
                 .with_alignment(Alignment::Center);
 
-            content = content.add_child(banner);
+            menu_panel = menu_panel.add_child(banner);
+            menu_panel = menu_panel.add_child(Label::new(""));
 
-            // Add spacing
-            content = content.add_child(Label::new(""));
+            // Menu title
+            let menu_title = match state.mode {
+                MenuMode::Main => "MAIN MENU",
+                MenuMode::ServiceSubmenu => "LAUNCH SERVICE",
+            };
+            menu_panel = menu_panel.add_child(
+                Label::new(menu_title)
+                    .with_text_color(Color::Yellow)
+                    .with_alignment(Alignment::Center)
+            );
+            menu_panel = menu_panel.add_child(Label::new(""));
 
             // Menu items
-            for (idx, item) in state.items.iter().enumerate() {
+            let items_to_display: Vec<String> = match state.mode {
+                MenuMode::Main => state.items.iter().map(|i| i.label().to_string()).collect(),
+                MenuMode::ServiceSubmenu => state.sub_items.iter().map(|i| i.label().to_string()).collect(),
+            };
+
+            for (idx, item_label) in items_to_display.iter().enumerate() {
                 let label_text = if idx == state.selected {
-                    format!("▶  {}  ◀", item.label())
+                    format!("▶  {}  ◀", item_label)
                 } else {
-                    format!("   {}   ", item.label())
+                    format!("   {}   ", item_label)
                 };
 
                 let color = if idx == state.selected {
@@ -101,29 +242,65 @@ fn main() -> minui::Result<()> {
                     Color::White
                 };
 
-                let item_label = Label::new(&label_text)
+                let item = Label::new(&label_text)
                     .with_text_color(color)
                     .with_alignment(Alignment::Center);
 
-                content = content.add_child(item_label);
+                menu_panel = menu_panel.add_child(item);
             }
 
             // Add spacing
-            content = content.add_child(Label::new(""));
+            menu_panel = menu_panel.add_child(Label::new(""));
 
             // Footer with controls
-            let footer = Label::new("↑/↓: Navigate  |  Enter: Select  |  Q/Esc: Quit")
+            let footer = Label::new("↑/↓: Navigate  |  Enter: Select  |  Q/Esc: Back/Quit")
                 .with_text_color(Color::DarkGray)
                 .with_alignment(Alignment::Center);
 
-            content = content.add_child(footer);
+            menu_panel = menu_panel.add_child(footer);
 
-            // Add content to main container with auto-centering
-            main_container = main_container
-                .add_child(content)
-                .with_auto_center();
+            // Create right panel (status)
+            let mut status_panel = Container::new(menu_width, 0, status_width, height)
+                .with_padding(2)
+                .with_border(BorderChars::double_line())
+                .with_border_color(Color::Magenta);
 
-            main_container.draw(window)?;
+            // Status panel title
+            status_panel = status_panel.add_child(
+                Label::new("SERVICE STATUS")
+                    .with_text_color(Color::Magenta)
+                    .with_alignment(Alignment::Center)
+            );
+            status_panel = status_panel.add_child(Label::new(""));
+
+            // Service status list
+            let services = state.services.lock().unwrap();
+            for service in services.iter() {
+                let status_line = format!(
+                    "{} {} :{}",
+                    service.status.label(),
+                    service.name,
+                    service.port
+                );
+
+                status_panel = status_panel.add_child(
+                    Label::new(&status_line)
+                        .with_text_color(service.status.color())
+                        .with_alignment(Alignment::Left)
+                );
+            }
+
+            status_panel = status_panel.add_child(Label::new(""));
+            status_panel = status_panel.add_child(
+                Label::new("Updated every 1s")
+                    .with_text_color(Color::DarkGray)
+                    .with_alignment(Alignment::Center)
+            );
+
+            // Draw both panels directly
+            menu_panel.draw(window)?;
+            status_panel.draw(window)?;
+
             Ok(())
         },
     )?;
@@ -131,19 +308,85 @@ fn main() -> minui::Result<()> {
     Ok(())
 }
 
+async fn check_services_status(services: &Arc<Mutex<Vec<Service>>>) {
+    let mut services_guard = services.lock().unwrap();
+
+    for service in services_guard.iter_mut() {
+        // Simple TCP port check for database, HTTP check for others
+        let is_online = if service.port == 5432 {
+            check_tcp_port(service.port).await
+        } else {
+            check_http_endpoint(&service.endpoint).await
+        };
+
+        service.status = if is_online {
+            ServiceStatus::Online
+        } else {
+            ServiceStatus::Offline
+        };
+    }
+}
+
+async fn check_http_endpoint(endpoint: &str) -> bool {
+    match reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+    {
+        Ok(client) => {
+            match client.get(endpoint).send().await {
+                Ok(response) => response.status().is_success(),
+                Err(_) => false,
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+async fn check_tcp_port(port: u16) -> bool {
+    use tokio::net::TcpStream;
+    TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .is_ok()
+}
+
 fn handle_selection(item: &MenuItem, state: &mut MenuState) {
     match item {
-        MenuItem::StartPipeline => {
-            // TODO: Launch pipeline
+        MenuItem::Launch => {
+            // TODO: Launch all services
         }
-        MenuItem::ViewStatus => {
-            // TODO: Show status screen
+        MenuItem::Restart => {
+            // TODO: Restart all services
+        }
+        MenuItem::LaunchService => {
+            state.mode = MenuMode::ServiceSubmenu;
+            state.selected = 0;
         }
         MenuItem::Configuration => {
             // TODO: Show configuration screen
         }
-        MenuItem::Exit => {
+        MenuItem::Quit => {
             state.running = false;
+        }
+    }
+}
+
+fn handle_submenu_selection(item: &SubMenuItem, state: &mut MenuState) {
+    match item {
+        SubMenuItem::EmbeddingService => {
+            // TODO: Launch embedding service
+        }
+        SubMenuItem::ClusteringService => {
+            // TODO: Launch clustering service
+        }
+        SubMenuItem::WebServer => {
+            // TODO: Launch web server
+        }
+        SubMenuItem::Database => {
+            // TODO: Launch database
+        }
+        SubMenuItem::Back => {
+            state.mode = MenuMode::Main;
+            state.selected = 0;
         }
     }
 }

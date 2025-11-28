@@ -1,5 +1,6 @@
 // Public API exports
 pub mod chunker;
+pub mod embedder;
 pub mod parser;
 pub mod sandbox;
 pub mod security;
@@ -13,3 +14,5 @@ pub use parser::{
 };
 
 pub use chunker::{Chunk, ChunkMetadata, DEFAULT_MAX_TOKENS, chunk_semantic_units};
+
+pub use embedder::{Batcher, EmbedError, EmbeddingClient, EmbeddingModelInfo};

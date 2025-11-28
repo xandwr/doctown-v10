@@ -1,6 +1,7 @@
 // client.rs - the HTTP/Subprocess embedder
 use crate::embedder::types::*;
 use reqwest::Client;
+use reqwest::blocking::Client as BlockingClient;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -21,6 +22,7 @@ pub enum EmbedError {
 
 pub struct EmbeddingClient {
     http: Client,
+    blocking_http: BlockingClient,
     endpoint: String,
     #[allow(dead_code)]
     timeout: Duration,
@@ -37,8 +39,14 @@ impl EmbeddingClient {
             .build()
             .expect("Failed to build HTTP client");
 
+        let blocking_http = BlockingClient::builder()
+            .timeout(timeout)
+            .build()
+            .expect("Failed to build blocking HTTP client");
+
         Self {
             http,
+            blocking_http,
             endpoint: endpoint.into(),
             timeout,
         }
@@ -76,5 +84,39 @@ impl EmbeddingClient {
 
     pub async fn embed_chunks(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
         self.embed(texts).await
+    }
+
+    /// Blocking version of embed for synchronous contexts
+    pub fn embed_blocking(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let req = EmbeddingRequest { texts };
+        let response = self
+            .blocking_http
+            .post(format!("{}/embed", self.endpoint))
+            .json(&req)
+            .send()?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(EmbedError::ServerError {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let res: EmbeddingResponse = response.json()?;
+
+        Ok(res.embeddings)
+    }
+
+    /// Blocking version of embed_chunks for synchronous contexts
+    pub fn embed_chunks_blocking(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedError> {
+        self.embed_blocking(texts)
     }
 }

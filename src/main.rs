@@ -4,8 +4,7 @@ use doctown_v10::{
 };
 use std::time::Instant;
 
-#[tokio::main]
-async fn main() -> Result<(), SandboxError> {
+fn main() -> Result<(), SandboxError> {
     let start_time = Instant::now();
     println!("=== DocTown v10: Sandboxed ZIP Ingestion with Parser Pipeline ===\n");
 
@@ -124,7 +123,7 @@ async fn main() -> Result<(), SandboxError> {
         "  Sending {} chunks to embedding server...",
         chunk_texts.len()
     );
-    let embeddings = match embedding_client.embed_chunks(chunk_texts).await {
+    let embeddings = match embedding_client.embed_chunks_blocking(chunk_texts) {
         Ok(emb) => {
             println!("  ✓ Received {} embeddings", emb.len());
             if !emb.is_empty() {

@@ -2,6 +2,9 @@ mod registry;
 mod result;
 mod unknown;
 
+#[cfg(test)]
+mod tests;
+
 pub use registry::ParserRegistry;
 pub use result::{FileMetadata, ParseResult, SemanticKind, SemanticUnit};
 pub use unknown::UnknownParser;

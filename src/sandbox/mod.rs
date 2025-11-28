@@ -1,6 +1,9 @@
 mod entry;
 mod error;
 
+#[cfg(test)]
+mod tests;
+
 pub use entry::FileEntry;
 pub use error::SandboxError;
 

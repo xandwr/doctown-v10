@@ -1,9 +1,4 @@
 [workspace]
-members = [
-    "crates/doctown-core",
-    "crates/localdoc",
-    "crates/sandbox",
-    "crates/doctown-builder",
-]
+members = ["crates/builder", "crates/localdoc"]
 
 resolver = "3"

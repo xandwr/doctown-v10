@@ -3,17 +3,9 @@
 version = 4
 
 [[package]]
-name = "doctown-builder"
-version = "0.1.0"
-
-[[package]]
-name = "doctown-core"
+name = "builder"
 version = "0.1.0"
 
 [[package]]
 name = "localdoc"
-version = "0.1.0"
-
-[[package]]
-name = "sandbox"
 version = "0.1.0"

@@ -1,6 +1,8 @@
 use minui::prelude::*;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::process::{Child, Command};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 enum MenuItem {
@@ -26,8 +28,8 @@ impl MenuItem {
 #[derive(Debug, Clone)]
 enum SubMenuItem {
     EmbeddingService,
-    ClusteringService,
-    WebServer,
+    DocumenterService,
+    DoctownMain,
     Database,
     Back,
 }
@@ -35,9 +37,9 @@ enum SubMenuItem {
 impl SubMenuItem {
     fn label(&self) -> &str {
         match self {
-            SubMenuItem::EmbeddingService => "Embedding Service",
-            SubMenuItem::ClusteringService => "Clustering Service",
-            SubMenuItem::WebServer => "Web Server",
+            SubMenuItem::EmbeddingService => "Embedding Service (Python)",
+            SubMenuItem::DocumenterService => "Documenter Service (Python)",
+            SubMenuItem::DoctownMain => "Doctown Main (Rust)",
             SubMenuItem::Database => "Database",
             SubMenuItem::Back => "← Back to Main Menu",
         }
@@ -70,21 +72,37 @@ impl ServiceStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ServiceType {
+    PythonEmbedding,
+    PythonDocumenter,
+    RustMain,
+    Database,
+}
+
 #[derive(Debug, Clone)]
 struct Service {
     name: String,
     port: u16,
     status: ServiceStatus,
     endpoint: String,
+    service_type: ServiceType,
+}
+
+#[allow(dead_code)]
+struct ServiceProcess {
+    child: Child,
+    service_type: ServiceType,
 }
 
 impl Service {
-    fn new(name: &str, port: u16, endpoint: &str) -> Self {
+    fn new(name: &str, port: u16, endpoint: &str, service_type: ServiceType) -> Self {
         Service {
             name: name.to_string(),
             port,
             status: ServiceStatus::Offline,
             endpoint: endpoint.to_string(),
+            service_type,
         }
     }
 }
@@ -100,17 +118,20 @@ struct MenuState {
     items: Vec<MenuItem>,
     sub_items: Vec<SubMenuItem>,
     services: Arc<Mutex<Vec<Service>>>,
+    processes: Arc<Mutex<Vec<ServiceProcess>>>,
     running: bool,
     mode: MenuMode,
 }
 
 fn main() -> minui::Result<()> {
     let services = Arc::new(Mutex::new(vec![
-        Service::new("Embedding Service", 8000, "http://localhost:8000/health"),
-        Service::new("Clustering Service", 8001, "http://localhost:8001/health"),
-        Service::new("Web Server", 3000, "http://localhost:3000/health"),
-        Service::new("Database", 5432, "http://localhost:5432"),
+        Service::new("Embedding Service", 18115, "http://localhost:18115/health", ServiceType::PythonEmbedding),
+        Service::new("Documenter Service", 18116, "http://localhost:18116/health", ServiceType::PythonDocumenter),
+        Service::new("Doctown Main", 3000, "http://localhost:3000/health", ServiceType::RustMain),
+        Service::new("Database", 5432, "http://localhost:5432", ServiceType::Database),
     ]));
+
+    let processes = Arc::new(Mutex::new(Vec::<ServiceProcess>::new()));
 
     let state = MenuState {
         selected: 0,
@@ -123,12 +144,13 @@ fn main() -> minui::Result<()> {
         ],
         sub_items: vec![
             SubMenuItem::EmbeddingService,
-            SubMenuItem::ClusteringService,
-            SubMenuItem::WebServer,
+            SubMenuItem::DocumenterService,
+            SubMenuItem::DoctownMain,
             SubMenuItem::Database,
             SubMenuItem::Back,
         ],
         services: Arc::clone(&services),
+        processes: Arc::clone(&processes),
         running: true,
         mode: MenuMode::Main,
     };
@@ -150,15 +172,13 @@ fn main() -> minui::Result<()> {
     app.run(
         |state, event| {
             match event {
-                Event::Character('q') | Event::Escape => {
-                    match state.mode {
-                        MenuMode::Main => state.running = false,
-                        MenuMode::ServiceSubmenu => {
-                            state.mode = MenuMode::Main;
-                            state.selected = 0;
-                        }
+                Event::Character('q') | Event::Escape => match state.mode {
+                    MenuMode::Main => state.running = false,
+                    MenuMode::ServiceSubmenu => {
+                        state.mode = MenuMode::Main;
+                        state.selected = 0;
                     }
-                }
+                },
                 Event::KeyUp => {
                     if state.selected > 0 {
                         state.selected -= 1;
@@ -173,18 +193,16 @@ fn main() -> minui::Result<()> {
                         state.selected += 1;
                     }
                 }
-                Event::Enter => {
-                    match state.mode {
-                        MenuMode::Main => {
-                            let selected_item = state.items[state.selected].clone();
-                            handle_selection(&selected_item, state);
-                        }
-                        MenuMode::ServiceSubmenu => {
-                            let selected_item = state.sub_items[state.selected].clone();
-                            handle_submenu_selection(&selected_item, state);
-                        }
+                Event::Enter => match state.mode {
+                    MenuMode::Main => {
+                        let selected_item = state.items[state.selected].clone();
+                        handle_selection(&selected_item, state);
                     }
-                }
+                    MenuMode::ServiceSubmenu => {
+                        let selected_item = state.sub_items[state.selected].clone();
+                        handle_submenu_selection(&selected_item, state);
+                    }
+                },
                 _ => {}
             }
             state.running
@@ -219,14 +237,18 @@ fn main() -> minui::Result<()> {
             menu_panel = menu_panel.add_child(
                 Label::new(menu_title)
                     .with_text_color(Color::Yellow)
-                    .with_alignment(Alignment::Center)
+                    .with_alignment(Alignment::Center),
             );
             menu_panel = menu_panel.add_child(Label::new(""));
 
             // Menu items
             let items_to_display: Vec<String> = match state.mode {
                 MenuMode::Main => state.items.iter().map(|i| i.label().to_string()).collect(),
-                MenuMode::ServiceSubmenu => state.sub_items.iter().map(|i| i.label().to_string()).collect(),
+                MenuMode::ServiceSubmenu => state
+                    .sub_items
+                    .iter()
+                    .map(|i| i.label().to_string())
+                    .collect(),
             };
 
             for (idx, item_label) in items_to_display.iter().enumerate() {
@@ -269,7 +291,7 @@ fn main() -> minui::Result<()> {
             status_panel = status_panel.add_child(
                 Label::new("SERVICE STATUS")
                     .with_text_color(Color::Magenta)
-                    .with_alignment(Alignment::Center)
+                    .with_alignment(Alignment::Center),
             );
             status_panel = status_panel.add_child(Label::new(""));
 
@@ -286,7 +308,7 @@ fn main() -> minui::Result<()> {
                 status_panel = status_panel.add_child(
                     Label::new(&status_line)
                         .with_text_color(service.status.color())
-                        .with_alignment(Alignment::Left)
+                        .with_alignment(Alignment::Left),
                 );
             }
 
@@ -294,7 +316,7 @@ fn main() -> minui::Result<()> {
             status_panel = status_panel.add_child(
                 Label::new("Updated every 1s")
                     .with_text_color(Color::DarkGray)
-                    .with_alignment(Alignment::Center)
+                    .with_alignment(Alignment::Center),
             );
 
             // Draw both panels directly
@@ -332,12 +354,10 @@ async fn check_http_endpoint(endpoint: &str) -> bool {
         .timeout(Duration::from_millis(500))
         .build()
     {
-        Ok(client) => {
-            match client.get(endpoint).send().await {
-                Ok(response) => response.status().is_success(),
-                Err(_) => false,
-            }
-        }
+        Ok(client) => match client.get(endpoint).send().await {
+            Ok(response) => response.status().is_success(),
+            Err(_) => false,
+        },
         Err(_) => false,
     }
 }
@@ -349,13 +369,86 @@ async fn check_tcp_port(port: u16) -> bool {
         .is_ok()
 }
 
+fn get_project_root() -> PathBuf {
+    // Assuming harness is in doctown-v10/doctown-harness
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.to_path_buf()))
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from(".."))
+}
+
+fn launch_service(service_type: ServiceType, processes: &Arc<Mutex<Vec<ServiceProcess>>>) -> std::result::Result<(), String> {
+    let project_root = get_project_root();
+
+    let child = match service_type {
+        ServiceType::PythonEmbedding => {
+            let python_path = project_root.join("python").join("embedding");
+            Command::new("python")
+                .arg("server.py")
+                .current_dir(&python_path)
+                .spawn()
+                .map_err(|e| format!("Failed to launch embedding service: {}. Make sure you're in the correct directory and Python is installed.", e))?
+        }
+        ServiceType::PythonDocumenter => {
+            let python_path = project_root.join("python").join("documenter");
+            Command::new("python")
+                .arg("server.py")
+                .current_dir(&python_path)
+                .spawn()
+                .map_err(|e| format!("Failed to launch documenter service: {}. Make sure you're in the correct directory and Python is installed.", e))?
+        }
+        ServiceType::RustMain => {
+            Command::new("cargo")
+                .arg("run")
+                .arg("--release")
+                .current_dir(&project_root)
+                .spawn()
+                .map_err(|e| format!("Failed to launch Doctown main: {}", e))?
+        }
+        ServiceType::Database => {
+            return Err("Database management not implemented yet".to_string());
+        }
+    };
+
+    let mut procs = processes.lock().unwrap();
+    procs.push(ServiceProcess {
+        child,
+        service_type: service_type.clone(),
+    });
+
+    Ok(())
+}
+
+fn stop_all_services(processes: &Arc<Mutex<Vec<ServiceProcess>>>) {
+    let mut procs = processes.lock().unwrap();
+    for proc in procs.iter_mut() {
+        let _ = proc.child.kill();
+    }
+    procs.clear();
+}
+
 fn handle_selection(item: &MenuItem, state: &mut MenuState) {
     match item {
         MenuItem::Launch => {
-            // TODO: Launch all services
+            // Launch all services
+            let services = state.services.lock().unwrap().clone();
+            for service in services.iter() {
+                if let Err(e) = launch_service(service.service_type.clone(), &state.processes) {
+                    eprintln!("Failed to launch {}: {}", service.name, e);
+                }
+            }
         }
         MenuItem::Restart => {
-            // TODO: Restart all services
+            // Restart all services
+            stop_all_services(&state.processes);
+            std::thread::sleep(Duration::from_secs(1));
+            let services = state.services.lock().unwrap().clone();
+            for service in services.iter() {
+                if let Err(e) = launch_service(service.service_type.clone(), &state.processes) {
+                    eprintln!("Failed to restart {}: {}", service.name, e);
+                }
+            }
         }
         MenuItem::LaunchService => {
             state.mode = MenuMode::ServiceSubmenu;
@@ -365,6 +458,7 @@ fn handle_selection(item: &MenuItem, state: &mut MenuState) {
             // TODO: Show configuration screen
         }
         MenuItem::Quit => {
+            stop_all_services(&state.processes);
             state.running = false;
         }
     }
@@ -373,16 +467,24 @@ fn handle_selection(item: &MenuItem, state: &mut MenuState) {
 fn handle_submenu_selection(item: &SubMenuItem, state: &mut MenuState) {
     match item {
         SubMenuItem::EmbeddingService => {
-            // TODO: Launch embedding service
+            if let Err(e) = launch_service(ServiceType::PythonEmbedding, &state.processes) {
+                eprintln!("Failed to launch embedding service: {}", e);
+            }
         }
-        SubMenuItem::ClusteringService => {
-            // TODO: Launch clustering service
+        SubMenuItem::DocumenterService => {
+            if let Err(e) = launch_service(ServiceType::PythonDocumenter, &state.processes) {
+                eprintln!("Failed to launch documenter service: {}", e);
+            }
         }
-        SubMenuItem::WebServer => {
-            // TODO: Launch web server
+        SubMenuItem::DoctownMain => {
+            if let Err(e) = launch_service(ServiceType::RustMain, &state.processes) {
+                eprintln!("Failed to launch Doctown main: {}", e);
+            }
         }
         SubMenuItem::Database => {
-            // TODO: Launch database
+            if let Err(e) = launch_service(ServiceType::Database, &state.processes) {
+                eprintln!("Failed to launch database: {}", e);
+            }
         }
         SubMenuItem::Back => {
             state.mode = MenuMode::Main;

@@ -3,12 +3,24 @@ use doctown_v10::{
     chunk_semantic_units, kmeans,
 };
 use std::time::Instant;
-use std::process::Command;
+use std::process::{Command, Child};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 fn main() -> Result<(), SandboxError> {
+    // Track spawned service processes so we can clean them up
+    let service_processes = Arc::new(Mutex::new(Vec::<Child>::new()));
+    let processes_clone = Arc::clone(&service_processes);
+    
+    // Register cleanup handler for Ctrl+C
+    ctrlc::set_handler(move || {
+        eprintln!("\n🛑 Shutting down services...");
+        cleanup_services(&processes_clone);
+        std::process::exit(0);
+    }).expect("Error setting Ctrl-C handler");
+    
     // Check and auto-launch backend services if needed
-    check_and_launch_services();
+    check_and_launch_services(&service_processes);
     
     let start_time = Instant::now();
     println!("=== DocTown v10: Sandboxed ZIP Ingestion with Parser Pipeline ===\n");
@@ -273,40 +285,81 @@ fn main() -> Result<(), SandboxError> {
     println!("Clustering:           K-means with cosine distance");
     println!("\nNext step: Generate summaries from clusters for RAG");
 
+    // Clean up services before exiting
+    println!("\n🛑 Shutting down services...");
+    cleanup_services(&service_processes);
+
     Ok(())
 }
 
-fn check_and_launch_services() {
+fn check_and_launch_services(service_processes: &Arc<Mutex<Vec<Child>>>) {
     println!("Checking backend services...");
     
-    // Check embedding service
-    if !check_service("http://localhost:18115/health") {
-        println!("  ⚠ Embedding service not running - launching...");
-        if let Err(e) = launch_service("Embedding Service", &["python3", "server.py"], "python/embedding") {
-            eprintln!("  ✗ Failed to launch embedding service: {}", e);
-        } else {
-            println!("  ✓ Embedding service launched in new window");
-            // Give it a moment to start
-            std::thread::sleep(std::time::Duration::from_secs(2));
+    // First, clean up any existing Python server processes to avoid port conflicts and CUDA memory leaks
+    println!("  🧹 Cleaning up existing backend processes...");
+    kill_existing_services();
+    
+    // Give the OS a moment to clean up
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    
+    // Launch embedding service
+    println!("  🚀 Launching embedding service...");
+    match launch_service("Embedding Service", &["python3", "server.py"], "python/embedding") {
+        Ok(child) => {
+            service_processes.lock().unwrap().push(child);
+            println!("  ⏳ Waiting for embedding service to be ready...");
+            wait_for_service("http://localhost:18115/health", "Embedding Service", 60);
         }
-    } else {
-        println!("  ✓ Embedding service is running");
+        Err(e) => eprintln!("  ✗ Failed to launch embedding service: {}", e),
     }
     
-    // Check documenter service
-    if !check_service("http://localhost:18116/health") {
-        println!("  ⚠ Documenter service not running - launching...");
-        if let Err(e) = launch_service("Documenter Service", &["python3", "server.py"], "python/documenter") {
-            eprintln!("  ✗ Failed to launch documenter service: {}", e);
-        } else {
-            println!("  ✓ Documenter service launched in new window");
-            std::thread::sleep(std::time::Duration::from_secs(2));
+    // Launch documenter service
+    println!("  🚀 Launching documenter service...");
+    match launch_service("Documenter Service", &["python3", "server.py"], "python/documenter") {
+        Ok(child) => {
+            service_processes.lock().unwrap().push(child);
+            println!("  ⏳ Waiting for documenter service to be ready...");
+            wait_for_service("http://localhost:18116/health", "Documenter Service", 60);
         }
-    } else {
-        println!("  ✓ Documenter service is running");
+        Err(e) => eprintln!("  ✗ Failed to launch documenter service: {}", e),
     }
     
     println!();
+}
+
+fn wait_for_service(url: &str, name: &str, timeout_secs: u64) {
+    let start = Instant::now();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    
+    while start.elapsed() < timeout {
+        if check_service(url) {
+            println!("  ✓ {} is ready!", name);
+            return;
+        }
+        
+        // Show progress every 5 seconds
+        let elapsed = start.elapsed().as_secs();
+        if elapsed > 0 && elapsed % 5 == 0 {
+            println!("    ... still waiting ({:.0}s elapsed)", elapsed);
+        }
+        
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    
+    eprintln!("  ⚠ {} did not respond within {}s - continuing anyway", name, timeout_secs);
+}
+
+fn kill_existing_services() {
+    // Kill any Python processes running server.py in embedding or documenter directories
+    let _ = Command::new("pkill")
+        .arg("-f")
+        .arg("python3.*embedding.*server.py")
+        .output();
+    
+    let _ = Command::new("pkill")
+        .arg("-f")
+        .arg("python3.*documenter.*server.py")
+        .output();
 }
 
 fn check_service(url: &str) -> bool {
@@ -322,15 +375,28 @@ fn check_service(url: &str) -> bool {
     }
 }
 
-fn launch_service(title: &str, command_args: &[&str], relative_path: &str) -> std::io::Result<()> {
+fn launch_service(title: &str, command_args: &[&str], relative_path: &str) -> std::io::Result<Child> {
     let project_root = std::env::current_dir()?;
     let working_dir = project_root.join(relative_path);
     
-    launch_in_terminal(title, command_args, &working_dir)?;
-    Ok(())
+    launch_in_terminal(title, command_args, &working_dir)
 }
 
-fn launch_in_terminal(title: &str, command_args: &[&str], working_dir: &PathBuf) -> std::io::Result<std::process::Child> {
+fn cleanup_services(service_processes: &Arc<Mutex<Vec<Child>>>) {
+    let mut processes = service_processes.lock().unwrap();
+    
+    // Kill all tracked child processes
+    for child in processes.iter_mut() {
+        let _ = child.kill();
+    }
+    
+    // Also kill any lingering Python server processes
+    kill_existing_services();
+    
+    processes.clear();
+}
+
+fn launch_in_terminal(title: &str, command_args: &[&str], working_dir: &PathBuf) -> std::io::Result<Child> {
     let command_str = command_args.join(" ");
     
     // Get project root to access python/.venv
@@ -338,11 +404,11 @@ fn launch_in_terminal(title: &str, command_args: &[&str], working_dir: &PathBuf)
     let venv_activate = project_root.join("python").join(".venv").join("bin").join("activate");
     
     // Source bashrc, activate uv venv if it exists, then run command
+    // Window will close automatically when the command finishes or is killed (no -hold, no read)
     let full_command = format!(
         "source ~/.bashrc 2>/dev/null || source /etc/bash.bashrc 2>/dev/null; \
          if [ -f '{}' ]; then source '{}'; fi; \
-         cd '{}' && {} ; \
-         echo ''; echo 'Process finished. Press Enter to close...'; read",
+         cd '{}' && {}",
         venv_activate.display(),
         venv_activate.display(),
         working_dir.display(),
@@ -350,10 +416,10 @@ fn launch_in_terminal(title: &str, command_args: &[&str], working_dir: &PathBuf)
     );
     
     // Try xterm first (now installed, reliable, no snap conflicts)
+    // Remove -hold so window closes when process exits/is killed
     let result = Command::new("xterm")
         .arg("-title")
         .arg(title)
-        .arg("-hold")
         .arg("-e")
         .arg("bash")
         .arg("-c")
